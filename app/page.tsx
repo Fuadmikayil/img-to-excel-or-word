@@ -1,19 +1,125 @@
 "use client";
 import { useEffect, useRef, useState } from 'react';
 import Tesseract from 'tesseract.js';
-import * as XLSX from 'xlsx';
+import {
+  Document,
+  HeadingLevel,
+  Packer,
+  Paragraph,
+  TextRun,
+} from 'docx';
 
-type ExportFormat = 'excel' | 'word';
+type ImageMetadata = {
+  fileName: string;
+  mimeType: string;
+  fileSizeKB: string;
+  width: number;
+  height: number;
+  uploadedAt: string;
+};
 
 export default function Home() {
   const [image, setImage] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [exportFormat, setExportFormat] = useState<ExportFormat>('word');
   const [isConverting, setIsConverting] = useState(false);
   const [extractedText, setExtractedText] = useState('');
   const [isDone, setIsDone] = useState(false);
+  const [imageMetadata, setImageMetadata] = useState<ImageMetadata | null>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  const stripExtension = (name: string) => name.replace(/\.[^/.]+$/, '');
+
+  const getImageDimensions = (dataUrl: string) =>
+    new Promise<{ width: number; height: number }>((resolve, reject) => {
+      const img = new window.Image();
+      img.onload = () => resolve({ width: img.width, height: img.height });
+      img.onerror = () => reject(new Error('Could not read image dimensions'));
+      img.src = dataUrl;
+    });
+
+  const buildDescription = (recognizedText: string, metadata: ImageMetadata) => {
+    const lineCount = recognizedText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean).length;
+
+    if (!recognizedText || recognizedText === 'No readable text found in the image.') {
+      return `No clear readable text was detected. The uploaded image appears to be ${metadata.width}x${metadata.height}px and may be mostly graphical.`;
+    }
+
+    if (lineCount > 8) {
+      return `The image appears to contain a document-style layout with multiple text lines (${lineCount} detected lines).`;
+    }
+
+    return `The image appears to contain short-form text content with ${lineCount} detected lines.`;
+  };
+
+  const downloadDocx = async (
+    recognizedText: string,
+    metadata: ImageMetadata,
+    description: string
+  ) => {
+    const normalizedText = recognizedText.trim() || 'No readable text found in the image.';
+    const lines = normalizedText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const extractedTextParagraphs = lines.length
+      ? lines.map(
+          (line) =>
+            new Paragraph({
+              children: [new TextRun({ text: line })],
+            })
+        )
+      : [new Paragraph('No readable text found in the image.')];
+
+    const doc = new Document({
+      sections: [
+        {
+          properties: {},
+          children: [
+            new Paragraph({
+              text: 'Scanned Document Output',
+              heading: HeadingLevel.TITLE,
+            }),
+            new Paragraph({
+              text: 'Extracted Text',
+              heading: HeadingLevel.HEADING_1,
+            }),
+            ...extractedTextParagraphs,
+            new Paragraph({ text: '' }),
+            new Paragraph({
+              text: 'Image Metadata',
+              heading: HeadingLevel.HEADING_1,
+            }),
+            new Paragraph(`File Name: ${metadata.fileName}`),
+            new Paragraph(`MIME Type: ${metadata.mimeType}`),
+            new Paragraph(`File Size: ${metadata.fileSizeKB} KB`),
+            new Paragraph(`Dimensions: ${metadata.width} x ${metadata.height} px`),
+            new Paragraph(`Uploaded At: ${metadata.uploadedAt}`),
+            new Paragraph({ text: '' }),
+            new Paragraph({
+              text: 'Image Description',
+              heading: HeadingLevel.HEADING_1,
+            }),
+            new Paragraph(description),
+          ],
+        },
+      ],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'scanned-document.docx';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
@@ -22,68 +128,47 @@ export default function Home() {
       setExtractedText('');
       setIsDone(false);
       const reader = new FileReader();
-      reader.onloadend = () => setImage(reader.result as string);
+      reader.onloadend = async () => {
+        const dataUrl = reader.result as string;
+        setImage(dataUrl);
+        try {
+          const dimensions = await getImageDimensions(dataUrl);
+          setImageMetadata({
+            fileName: stripExtension(file.name),
+            mimeType: file.type || 'unknown',
+            fileSizeKB: (file.size / 1024).toFixed(2),
+            width: dimensions.width,
+            height: dimensions.height,
+            uploadedAt: new Date().toLocaleString(),
+          });
+        } catch {
+          setImageMetadata({
+            fileName: stripExtension(file.name),
+            mimeType: file.type || 'unknown',
+            fileSizeKB: (file.size / 1024).toFixed(2),
+            width: 0,
+            height: 0,
+            uploadedAt: new Date().toLocaleString(),
+          });
+        }
+      };
       reader.readAsDataURL(file);
     }
   };
 
-  const createExcelFile = (imageData: string) => {
-    const ws = XLSX.utils.json_to_sheet([
-      { Image: 'Added image' },
-      { 'Image Data': imageData },
-    ]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
-    XLSX.writeFile(wb, 'imageData.xlsx');
-  };
-
-  const downloadWordBlob = (imageData: string, recognizedText: string) => {
-    const escaped = recognizedText
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-
-    const html = `<html>
-<head><meta charset="utf-8" /></head>
-<body>
-  <h2>Extracted Text</h2>
-  <pre style="white-space:pre-wrap;font-family:Calibri,sans-serif;font-size:14px;line-height:1.6">${escaped}</pre>
-  <br/>
-  <h3>Original Image</h3>
-  <img src="${imageData}" style="max-width:500px;height:auto;" />
-</body>
-</html>`;
-
-    const blob = new Blob([html], { type: 'application/msword;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'imageData.doc';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const createWordFile = async (imageData: string, imageFile: File) => {
-    const ocrResult = await Tesseract.recognize(imageFile, 'eng');
-    const recognizedText = ocrResult.data.text.trim() || 'No readable text found in the image.';
-    setExtractedText(recognizedText);
-    downloadWordBlob(imageData, recognizedText);
-  };
-
-  const handleAutoConvert = async (imageData: string, imageFile: File) => {
+  const handleAutoConvert = async (imageFile: File, metadata: ImageMetadata) => {
     setIsConverting(true);
     setIsDone(false);
     try {
-      if (exportFormat === 'excel') {
-        createExcelFile(imageData);
-      } else {
-        await createWordFile(imageData, imageFile);
-      }
+      const ocrResult = await Tesseract.recognize(imageFile, 'eng');
+      const recognizedText = ocrResult.data.text.trim() || 'No readable text found in the image.';
+      setExtractedText(recognizedText);
+
+      const description = buildDescription(recognizedText, metadata);
+      await downloadDocx(recognizedText, metadata, description);
       setIsDone(true);
     } catch {
-      alert('Conversion failed. Please try again.');
+      alert('Scanning failed. Please try again.');
     } finally {
       setIsConverting(false);
     }
@@ -108,12 +193,13 @@ export default function Home() {
     setSelectedFile(null);
     setExtractedText('');
     setIsDone(false);
+    setImageMetadata(null);
   };
 
   useEffect(() => {
-    if (!image || !selectedFile) return;
-    void handleAutoConvert(image, selectedFile);
-  }, [image, selectedFile]);
+    if (!selectedFile || !imageMetadata) return;
+    void handleAutoConvert(selectedFile, imageMetadata);
+  }, [selectedFile, imageMetadata]);
 
   return (
     <div className="min-h-screen bg-linear-to-br from-slate-100 to-blue-50 flex items-center justify-center p-4">
@@ -129,70 +215,19 @@ export default function Home() {
               </svg>
             </div>
             <div>
-              <h1 className="text-xl font-bold text-white">Image to Document</h1>
-              <p className="text-blue-100 text-sm mt-0.5">Snap or upload — get a document instantly</p>
+              <h1 className="text-xl font-bold text-white">Image to Word Converter</h1>
+              <p className="text-blue-100 text-sm mt-0.5">Upload a photo and automatically generate a Word document</p>
             </div>
           </div>
         </div>
 
         <div className="px-8 py-7 space-y-7">
 
-          {/* ── Step 1: Format ── */}
-          <section>
-            <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-3">
-              Step 1 &mdash; Choose output format
-            </p>
-            <div className="grid grid-cols-2 gap-3">
-
-              {/* Excel card */}
-              <button
-                type="button"
-                onClick={() => setExportFormat('excel')}
-                className={`relative flex items-center gap-3 p-3.5 rounded-xl border-2 text-left transition-all duration-150
-                  ${exportFormat === 'excel'
-                    ? 'border-emerald-500 bg-emerald-50 shadow-sm'
-                    : 'border-gray-200 hover:border-emerald-300 hover:bg-emerald-50/40'}`}
-              >
-                <span className="text-2xl leading-none select-none">📊</span>
-                <div>
-                  <p className={`text-sm font-semibold ${exportFormat === 'excel' ? 'text-emerald-700' : 'text-gray-700'}`}>Excel</p>
-                  <p className="text-[11px] text-gray-400">.xlsx spreadsheet</p>
-                </div>
-                {exportFormat === 'excel' && (
-                  <svg className="w-4 h-4 text-emerald-500 absolute top-2.5 right-2.5" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                )}
-              </button>
-
-              {/* Word card */}
-              <button
-                type="button"
-                onClick={() => setExportFormat('word')}
-                className={`relative flex items-center gap-3 p-3.5 rounded-xl border-2 text-left transition-all duration-150
-                  ${exportFormat === 'word'
-                    ? 'border-blue-500 bg-blue-50 shadow-sm'
-                    : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50/40'}`}
-              >
-                <span className="text-2xl leading-none select-none">📝</span>
-                <div>
-                  <p className={`text-sm font-semibold ${exportFormat === 'word' ? 'text-blue-700' : 'text-gray-700'}`}>Word</p>
-                  <p className="text-[11px] text-gray-400">.doc with OCR text</p>
-                </div>
-                {exportFormat === 'word' && (
-                  <svg className="w-4 h-4 text-blue-500 absolute top-2.5 right-2.5" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                )}
-              </button>
-            </div>
-          </section>
-
-          {/* ── Step 2: Add image (only when no image yet) ── */}
+          {/* ── Step 1: Add image ── */}
           {!image && (
             <section>
               <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-3">
-                Step 2 &mdash; Add an image
+                Step 1 &mdash; Add an image
               </p>
               <div className="grid grid-cols-2 gap-3">
 
@@ -249,7 +284,9 @@ export default function Home() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                       d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                   </svg>
-                  <p className="text-xs font-medium text-gray-600 truncate">{selectedFile?.name ?? 'Image preview'}</p>
+                  <p className="text-xs font-medium text-gray-600 truncate">
+                    {selectedFile ? selectedFile.name.replace(/\.[^/.]+$/, '') : 'Image preview'}
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -272,9 +309,9 @@ export default function Home() {
               </svg>
               <div>
                 <p className="text-sm font-semibold text-blue-700">
-                  {exportFormat === 'word' ? 'Reading image text with OCR…' : 'Generating Excel file…'}
+                  Extracting text and generating Word file...
                 </p>
-                <p className="text-xs text-blue-400 mt-0.5">This may take a few seconds</p>
+                <p className="text-xs text-blue-400 mt-0.5">OCR and formatting in progress</p>
               </div>
             </div>
           )}
@@ -288,12 +325,12 @@ export default function Home() {
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-emerald-700">Conversion complete!</p>
                 <p className="text-xs text-emerald-600 mt-0.5">
-                  Your {exportFormat === 'excel' ? 'Excel (.xlsx)' : 'Word (.doc)'} file was downloaded.
+                  Saved as a <strong>Word document (.docx)</strong>
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => image && selectedFile && void handleAutoConvert(image, selectedFile)}
+                onClick={() => selectedFile && imageMetadata && void handleAutoConvert(selectedFile, imageMetadata)}
                 className="text-xs font-semibold text-emerald-700 border border-emerald-300 rounded-lg px-2.5 py-1.5 hover:bg-emerald-100 transition-colors shrink-0"
               >
                 Download again
@@ -302,7 +339,7 @@ export default function Home() {
           )}
 
           {/* ── OCR text preview ── */}
-          {extractedText && exportFormat === 'word' && !isConverting && (
+          {extractedText && !isConverting && (
             <div className="border border-gray-200 rounded-xl overflow-hidden">
               <div className="bg-gray-50 border-b border-gray-200 px-4 py-2.5 flex items-center gap-2">
                 <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -314,6 +351,20 @@ export default function Home() {
               <pre className="px-4 py-3.5 text-xs text-gray-600 whitespace-pre-wrap max-h-44 overflow-y-auto leading-relaxed font-sans">
                 {extractedText}
               </pre>
+            </div>
+          )}
+
+          {imageMetadata && !isConverting && (
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="bg-gray-50 border-b border-gray-200 px-4 py-2.5">
+                <p className="text-xs font-semibold text-gray-500">Image metadata</p>
+              </div>
+              <div className="px-4 py-3 text-xs text-gray-600 space-y-1">
+                <p><strong>Name:</strong> {imageMetadata.fileName}</p>
+                <p><strong>MIME Type:</strong> {imageMetadata.mimeType}</p>
+                <p><strong>Size:</strong> {imageMetadata.fileSizeKB} KB</p>
+                <p><strong>Dimensions:</strong> {imageMetadata.width} x {imageMetadata.height} px</p>
+              </div>
             </div>
           )}
 
