@@ -1,18 +1,24 @@
 "use client";
 import { useEffect, useRef, useState } from 'react';
+import Tesseract from 'tesseract.js';
 import * as XLSX from 'xlsx';
 
 type ExportFormat = 'excel' | 'word';
 
 export default function Home() {
   const [image, setImage] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>('excel');
+  const [isConverting, setIsConverting] = useState(false);
+  const [extractedText, setExtractedText] = useState('');
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files ? e.target.files[0] : null;
     if (file) {
+      setSelectedFile(file);
+      setExtractedText('');
       const reader = new FileReader();
       reader.onloadend = () => {
         setImage(reader.result as string);
@@ -32,12 +38,18 @@ export default function Home() {
     XLSX.writeFile(wb, 'imageData.xlsx');
   };
 
-  const createWordFile = (imageData: string) => {
+  const createWordFile = async (imageData: string, imageFile: File) => {
+    const ocrResult = await Tesseract.recognize(imageFile, 'eng');
+    const recognizedText = ocrResult.data.text.trim() || 'No readable text found in the image.';
+    setExtractedText(recognizedText);
+
     const html = `
       <html>
         <head><meta charset="utf-8" /></head>
         <body>
-          <h2>Added Image</h2>
+          <h2>Extracted Text From Image</h2>
+          <pre style="white-space: pre-wrap; font-size: 14px; line-height: 1.5;">${recognizedText}</pre>
+          <h3>Original Image</h3>
           <img src="${imageData}" style="max-width: 500px; height: auto;" />
         </body>
       </html>
@@ -55,13 +67,21 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  const handleAutoConvert = (imageData: string) => {
-    if (exportFormat === 'excel') {
-      createExcelFile(imageData);
-      return;
-    }
+  const handleAutoConvert = async (imageData: string, imageFile: File) => {
+    setIsConverting(true);
 
-    createWordFile(imageData);
+    try {
+      if (exportFormat === 'excel') {
+        createExcelFile(imageData);
+        return;
+      }
+
+      await createWordFile(imageData, imageFile);
+    } catch {
+      alert('Could not read the image text for Word conversion. Please try again.');
+    } finally {
+      setIsConverting(false);
+    }
   };
 
   const handleTakePicture = async () => {
@@ -80,12 +100,12 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (!image) {
+    if (!image || !selectedFile) {
       return;
     }
 
-    handleAutoConvert(image);
-  }, [image]);
+    void handleAutoConvert(image, selectedFile);
+  }, [image, selectedFile]);
 
   return (
     <div className="flex flex-col items-center justify-center h-screen bg-gray-100 px-4">
@@ -151,6 +171,17 @@ export default function Home() {
       {image && (
         <div className="mb-6">
           <img src={image} alt="Uploaded" className="max-w-xs max-h-96" />
+        </div>
+      )}
+      {isConverting && (
+        <p className="text-sm text-blue-700 text-center mb-2">
+          Reading image and converting to {exportFormat}...
+        </p>
+      )}
+      {extractedText && exportFormat === 'word' && (
+        <div className="w-full max-w-md bg-white border border-gray-200 rounded p-3 mb-3">
+          <p className="text-sm font-semibold text-gray-700 mb-2">Extracted preview</p>
+          <p className="text-sm text-gray-600 whitespace-pre-wrap">{extractedText}</p>
         </div>
       )}
       <p className="text-sm text-gray-600 text-center">
